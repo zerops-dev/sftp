@@ -47,6 +47,8 @@ type Server struct {
 	openFilesLock sync.RWMutex
 	handleCount   int
 	workDir       string
+	chownUID      int
+	chownGID      int
 	winRoot       bool
 	maxTxPacket   uint32
 }
@@ -159,6 +161,16 @@ func WithAllocator() ServerOption {
 func WithServerWorkingDirectory(workDir string) ServerOption {
 	return func(s *Server) error {
 		s.workDir = cleanPath(workDir)
+		return nil
+	}
+}
+
+// WithServerChown chown all newly created files
+// If unset the current is used current UID and GID
+func WithServerChown(uid int, gid int) ServerOption {
+	return func(s *Server) error {
+		s.chownUID = uid
+		s.chownGID = gid
 		return nil
 	}
 }
@@ -518,6 +530,12 @@ func (p *sshFxpOpenPacket) respond(svr *Server) responsePacket {
 	f, err := svr.openfile(svr.toLocalPath(p.Path), osFlags, mode)
 	if err != nil {
 		return statusFromError(p.ID, err)
+	}
+	if svr.chownUID > 0 && svr.chownGID > 0 {
+		err := f.Chown(svr.chownUID, svr.chownGID)
+		if err != nil {
+			return statusFromError(p.ID, err)
+		}
 	}
 
 	handle := svr.nextHandle(f)
