@@ -274,6 +274,9 @@ func handlePacket(s *Server, p orderedRequest) error {
 	case *sshFxpMkdirPacket:
 		// TODO FIXME: ignore flags field
 		err := os.Mkdir(s.toLocalPath(p.Path), 0o755)
+		if err == nil && s.chownUID > 0 && s.chownGID > 0 {
+			err = os.Chown(s.toLocalPath(p.Path), s.chownUID, s.chownGID)
+		}
 		rpkt = statusFromError(p.ID, err)
 	case *sshFxpRmdirPacket:
 		err := os.Remove(s.toLocalPath(p.Path))
@@ -285,7 +288,10 @@ func handlePacket(s *Server, p orderedRequest) error {
 		err := os.Rename(s.toLocalPath(p.Oldpath), s.toLocalPath(p.Newpath))
 		rpkt = statusFromError(p.ID, err)
 	case *sshFxpSymlinkPacket:
-		err := os.Symlink(s.toLocalPath(p.Targetpath), s.toLocalPath(p.Linkpath))
+		err := os.Symlink(p.Targetpath, s.toLocalPath(p.Linkpath))
+		if err == nil && s.chownUID > 0 && s.chownGID > 0 {
+			err = os.Lchown(s.toLocalPath(p.Linkpath), s.chownUID, s.chownGID)
+		}
 		rpkt = statusFromError(p.ID, err)
 	case *sshFxpClosePacket:
 		rpkt = statusFromError(p.ID, s.closeHandle(p.Handle))
