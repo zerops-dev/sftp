@@ -275,6 +275,9 @@ func handlePacket(s *Server, p orderedRequest) error {
 	case *sshFxpMkdirPacket:
 		// TODO FIXME: ignore flags field
 		err := os.Mkdir(s.toLocalPath(p.Path), 0o755)
+		if err == nil && s.chownUID > 0 && s.chownGID > 0 {
+			err = os.Chown(s.toLocalPath(p.Path), s.chownUID, s.chownGID)
+		}
 		rpkt = statusFromError(p.ID, err)
 	case *sshFxpRmdirPacket:
 		err := os.Remove(s.toLocalPath(p.Path))
@@ -285,6 +288,9 @@ func handlePacket(s *Server, p orderedRequest) error {
 	case *sshFxpSymlinkPacket:
 		// Relative targets are resolved from the link's directory, not workDir.
 		err := os.Symlink(s.toLocalTarget(p.Targetpath), s.toLocalPath(p.Linkpath))
+		if err == nil && s.chownUID > 0 && s.chownGID > 0 {
+			err = os.Lchown(s.toLocalPath(p.Linkpath), s.chownUID, s.chownGID)
+		}
 		rpkt = statusFromError(p.ID, err)
 	case *sshFxpClosePacket:
 		rpkt = statusFromError(p.ID, s.closeHandle(p.Handle))
