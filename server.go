@@ -505,6 +505,10 @@ func (p *sshFxpOpenPacket) hasPflags(flags ...uint32) bool {
 	return true
 }
 
+// maxOpenfileCreatedAttempts bounds the retries of openfileCreated,
+// which also bounds the number of symlinks it follows (like the kernel's limit of 40).
+const maxOpenfileCreatedAttempts = 40
+
 // openfileCreated opens the file like openfile,
 // and when WithServerChown is in use it also reports whether the open created the file.
 func (svr *Server) openfileCreated(path string, flag int, mode fs.FileMode) (f file, created bool, err error) {
@@ -513,18 +517,37 @@ func (svr *Server) openfileCreated(path string, flag int, mode fs.FileMode) (f f
 		return f, false, err
 	}
 
-	// Create the file exclusively first, so that we know whether it is new.
-	f, err = svr.openfile(path, flag|os.O_EXCL, mode)
-	if err == nil {
-		return f, true, nil
-	}
-	if flag&os.O_EXCL != 0 || !errors.Is(err, os.ErrExist) {
-		return nil, false, err
+	for i := 0; i < maxOpenfileCreatedAttempts; i++ {
+		// Create the file exclusively first, so that we know whether it is new.
+		f, err = svr.openfile(path, flag|os.O_EXCL, mode)
+		if err == nil {
+			return f, true, nil
+		}
+		if flag&os.O_EXCL != 0 || !errors.Is(err, os.ErrExist) {
+			return nil, false, err
+		}
+
+		// The path already exists, so open it as requested, but without creating anything.
+		// This way a file can only ever be created by the exclusive open above.
+		f, err = svr.openfile(path, flag&^os.O_CREATE, mode)
+		if err == nil || !errors.Is(err, os.ErrNotExist) {
+			return f, false, err
+		}
+
+		// The path exists, yet there is nothing to open.
+		// Either it is a dangling symlink, which O_EXCL refuses to follow,
+		// so follow it by hand and create its target exclusively,
+		// or the file was removed between the two opens, so just try again.
+		if target, lerr := os.Readlink(path); lerr == nil {
+			if !filepath.IsAbs(target) {
+				// Not filepath.Join: cleaning the path lexically would resolve ".." differently than the kernel.
+				target = path[:len(path)-len(filepath.Base(path))] + target
+			}
+			path = target
+		}
 	}
 
-	// The path already exists, so open it as requested.
-	f, err = svr.openfile(path, flag, mode)
-	return f, false, err
+	return nil, false, &os.PathError{Op: "open", Path: path, Err: errTooManySymlinks}
 }
 
 func (p *sshFxpOpenPacket) respond(svr *Server) responsePacket {

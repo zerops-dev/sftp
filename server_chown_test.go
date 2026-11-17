@@ -116,3 +116,87 @@ func TestServerChownExclOnExistingFile(t *testing.T) {
 
 	require.Equal(t, before, ctimeOf(t, name))
 }
+
+func requireOwnedByUs(t *testing.T, name string) {
+	t.Helper()
+
+	var st syscall.Stat_t
+	require.NoError(t, syscall.Lstat(name, &st))
+	require.Equal(t, uint32(os.Getuid()), st.Uid)
+	require.Equal(t, uint32(os.Getgid()), st.Gid)
+}
+
+func TestServerOpenfileCreatedThroughDanglingSymlink(t *testing.T) {
+	tests := []struct {
+		name string
+		// links maps each symlink to its target, both relative to the test directory
+		links    map[string]string
+		absolute bool
+		open     string
+		target   string
+	}{
+		{name: "relative", links: map[string]string{"link": "target.txt"}, open: "link", target: "target.txt"},
+		{name: "absolute", links: map[string]string{"link": "target.txt"}, absolute: true, open: "link", target: "target.txt"},
+		{name: "other directory", links: map[string]string{"sub/link": "../target.txt"}, open: "sub/link", target: "target.txt"},
+		{name: "chain", links: map[string]string{"a": "b", "b": "sub/c", "sub/c": "../target.txt"}, open: "a", target: "target.txt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(dir, "sub"), 0o755))
+			for link, target := range tt.links {
+				if tt.absolute {
+					target = filepath.Join(dir, target)
+				}
+				require.NoError(t, os.Symlink(target, filepath.Join(dir, link)))
+			}
+
+			svr := &Server{chownUID: 1, chownGID: 1}
+			f, created, err := svr.openfileCreated(filepath.Join(dir, tt.open), os.O_WRONLY|os.O_CREATE, 0o644)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			require.True(t, created, "a file created through a dangling symlink must be reported as created")
+
+			fi, err := os.Lstat(filepath.Join(dir, tt.target))
+			require.NoError(t, err)
+			require.True(t, fi.Mode().IsRegular())
+
+			// The second open finds the file, so it must not report it as created.
+			f, created, err = svr.openfileCreated(filepath.Join(dir, tt.open), os.O_WRONLY|os.O_CREATE, 0o644)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+			require.False(t, created)
+		})
+	}
+}
+
+func TestServerOpenfileCreatedSymlinkLoop(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Symlink("b", filepath.Join(dir, "a")))
+	require.NoError(t, os.Symlink("a", filepath.Join(dir, "b")))
+
+	svr := &Server{chownUID: 1, chownGID: 1}
+	_, _, err := svr.openfileCreated(filepath.Join(dir, "a"), os.O_WRONLY|os.O_CREATE, 0o644)
+	require.ErrorIs(t, err, syscall.ELOOP, "the kernel reports the loop on the non-creating open")
+}
+
+func TestServerChownCreatesFileThroughDanglingSymlink(t *testing.T) {
+	client := chownClientServerPair(t)
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.Symlink("target.txt", link))
+
+	f, err := client.OpenFile(link, os.O_WRONLY|os.O_CREATE)
+	require.NoError(t, err)
+	_, err = f.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	requireOwnedByUs(t, target)
+
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "hello", string(got))
+}
